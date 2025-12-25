@@ -426,15 +426,43 @@ st.divider()
 faculty_df = load_data("재직교수")
 faculty_options = [f"{row['이름']} ({row['학과']}/{row['직급']})" for idx, row in faculty_df.iterrows()] if not faculty_df.empty else []
 
+# [수정] 일반 사용자 모드 개선
 if st.session_state['user_role'] == 'user':
-    st.info("💡 일반사용자는 '회의록 검색'만 가능합니다.")
+    # 1. 회의록 개요 (일자별)
+    st.header("📅 회의록 일자별 개요")
+    df = load_data("회의록")
+    
+    if not df.empty:
+        # 날짜 내림차순 정렬
+        df_overview = df.sort_values(by="날짜", ascending=False)
+        
+        # 표시할 컬럼 선택 및 설정
+        display_cols = ['날짜', '시간', '주제', '참석자_텍스트']
+        
+        st.dataframe(
+            df_overview[display_cols],
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "날짜": st.column_config.TextColumn("일자"),
+                "시간": st.column_config.TextColumn("시간"),
+                "주제": st.column_config.TextColumn("회의 주제"),
+                "참석자_텍스트": st.column_config.TextColumn("참석자 명단", width="large")
+            }
+        )
+    else:
+        st.info("등록된 회의록이 없습니다.")
+
+    st.divider()
+
+    # 2. 회의록 검색 (기존 기능)
+    st.info("💡 키워드로 상세 내용을 검색할 수 있습니다.")
     st.header("🔍 회의록 검색")
     c_s1, c_s2 = st.columns([1, 3])
     with c_s1: st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_usr")
     with c_s2: sk = st.text_input("검색어 입력", key="sk_usr")
     
     if sk:
-        df = load_data("회의록")
         if not df.empty:
             if st_type == "전체": mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
             elif st_type == "이름": mask = df['참석자_텍스트'].str.contains(sk)
@@ -537,14 +565,8 @@ else:
             st.success("저장 완료!")
             st.info("입력창 초기화?")
             c1, c2 = st.columns(2)
-            # [수정] 초기화 시 누락된 키(mn, md, mr, mc) 추가
             if c1.button("네", key="b_sy"):
-                keys_to_clear = [
-                    "i_t", "i_p", "ki", "final_content", 
-                    "mn", "md", "mr", "mc", # Manual inputs
-                    "i_f" # Faculty select
-                ]
-                for k in keys_to_clear:
+                for k in ["i_t", "i_p", "ki", "final_content", "mn", "md", "mr", "mc", "i_f"]:
                     if k in st.session_state: del st.session_state[k]
                 st.session_state['save_step'] = 'input'; st.rerun()
             if c2.button("아니오", key="b_sn"):
