@@ -9,7 +9,7 @@ import json
 import io
 import numpy as np
 import time
-import functools # 데코레이터용
+import functools
 
 # PDF 생성 라이브러리
 from reportlab.pdfgen import canvas
@@ -42,7 +42,7 @@ if "openai" in st.secrets:
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 SHEET_NAME = "교수학습공동체_DB" 
 
-# [핵심] API 재시도 데코레이터 (불안정 해결)
+# 재시도 데코레이터
 def retry_api_call(max_retries=3, delay=2):
     def decorator(func):
         @functools.wraps(func)
@@ -53,15 +53,14 @@ def retry_api_call(max_retries=3, delay=2):
                     return func(*args, **kwargs)
                 except (gspread.exceptions.APIError, gspread.exceptions.GSpreadException) as e:
                     last_exception = e
-                    time.sleep(delay * (i + 1)) # 점진적 대기 (2초, 4초, 6초...)
+                    time.sleep(delay * (i + 1))
                 except Exception as e:
                     raise e
-            st.error(f"⚠️ 구글 연결 실패 (재시도 초과): {last_exception}")
+            st.error(f"⚠️ 구글 연결 실패: {last_exception}")
             return None
         return wrapper
     return decorator
 
-# 연결 객체 캐싱 (1시간 유지)
 @st.cache_resource(ttl=3600)
 def init_gsheet_connection():
     try:
@@ -74,7 +73,6 @@ def init_gsheet_connection():
         st.error(f"❌ 구글 시트 연결 실패: {e}")
         return None
 
-# 워크시트 가져오기 (재시도 로직 적용 불가 - sh 객체 필요)
 def get_worksheet_object(tab_name):
     sh = init_gsheet_connection()
     if sh is None: return None
@@ -82,7 +80,6 @@ def get_worksheet_object(tab_name):
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
-        # 헤더 초기화
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
@@ -93,13 +90,10 @@ def get_sheet_url():
     sh = init_gsheet_connection()
     return sh.url if sh else None
 
-# 데이터 로드 (캐싱 + 재시도) - 속도 개선의 핵심
-# ttl=10: 10초 동안은 다시 로드하지 않고 메모리 데이터 사용
 @st.cache_data(ttl=10)
 @retry_api_call(max_retries=3)
 def load_data(tab_name):
     ws = get_worksheet_object(tab_name)
-    
     cols = []
     if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
     elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
@@ -114,14 +108,13 @@ def load_data(tab_name):
          
     return df
 
-# 저장/삭제/업데이트는 캐시를 비워야 함
 @retry_api_call(max_retries=3)
 def save_row(tab_name, row_data):
     ws = get_worksheet_object(tab_name)
     if ws:
         cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
         ws.append_row(cleaned_data)
-        load_data.clear() # 캐시 초기화 (다음 로드 때 반영)
+        load_data.clear()
 
 @retry_api_call(max_retries=3)
 def delete_row(tab_name, id_col_name, target_id):
@@ -130,7 +123,7 @@ def delete_row(tab_name, id_col_name, target_id):
     cell = ws.find(str(target_id))
     if cell:
         ws.delete_rows(cell.row)
-        load_data.clear() # 캐시 초기화
+        load_data.clear()
         return True
     return False
 
@@ -144,7 +137,7 @@ def update_row_by_id(tab_name, target_id, new_data_list):
         end_col_char = chr(64 + len(cleaned_data))
         cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
         ws.update(range_name=cell_range, values=[cleaned_data])
-        load_data.clear() # 캐시 초기화
+        load_data.clear()
         return True, "성공"
     return False, "ID 없음"
 
@@ -181,7 +174,6 @@ def update_row_by_date(tab_name, target_date, new_data_list):
 DEFAULT_PW = {"admin": "삼막로155", "user": "2601"}
 
 def init_settings_sheet():
-    # 설정 시트는 자주 바뀌지 않으므로 에러 시 무시
     try:
         ws = get_worksheet_object("설정")
         if ws:
@@ -195,7 +187,6 @@ def init_settings_sheet():
 
 def get_passwords():
     init_settings_sheet()
-    # 설정 탭 로드는 캐싱하지 않음 (로그인 직전이라 중요)
     try:
         ws = get_worksheet_object("설정")
         data = ws.get_all_records()
@@ -323,19 +314,20 @@ def create_csv_export(meeting_rows):
 def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
     st.markdown("---")
     
-    # [방어 로직] 데이터 로드 실패 대비
+    # [방어 로직]
     if df_m.empty or 'ID' not in df_m.columns:
-        st.error("데이터 로드 실패. 다시 시도해주세요.")
-        if st.button("돌아가기", key=f"btn_fail_{key_suffix}"):
+        st.warning("⚠️ 데이터를 불러올 수 없습니다.")
+        if st.button("목록으로 돌아가기", key=f"btn_err_back_{key_suffix}"):
             if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
             elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
         return
 
     filtered_df = df_m[df_m['ID'].astype(str) == str(current_id)]
+    
     if filtered_df.empty:
-        st.warning("데이터를 찾을 수 없습니다.")
-        if st.button("목록으로", key=f"btn_nf_{key_suffix}"):
+        st.warning("⚠️ 선택하신 데이터를 찾을 수 없습니다.")
+        if st.button("목록으로 돌아가기", key=f"btn_notfound_back_{key_suffix}"):
             if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
             elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
@@ -343,6 +335,7 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
 
     target_row = filtered_df.iloc[0]
     
+    # 상단 복귀 버튼
     if st.button("⬅️ 수정 취소 및 목록으로 돌아가기", key=f"btn_top_back_{key_suffix}"):
         if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
         elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
@@ -420,11 +413,13 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
         if success:
             st.success("수정되었습니다.")
             if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+            elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
         else: st.error(f"수정 실패: {msg}")
 
     if col_cancel.button("취소", key=f"btn_cc_{key_suffix}"):
         if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+        elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
         st.rerun()
 
 # ---------------------------------------------------------
