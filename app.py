@@ -8,7 +8,7 @@ import os
 import json
 import io
 import numpy as np
-import time # 재시도 로직용
+import time
 
 # PDF 생성 라이브러리
 from reportlab.pdfgen import canvas
@@ -41,15 +41,12 @@ if "openai" in st.secrets:
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 SHEET_NAME = "교수학습공동체_DB" 
 
-# [핵심 수정] 연결 객체 캐싱 (API 호출 최적화)
-# 이 함수는 프로그램 실행 중 딱 한 번만 실행되어 연결을 유지합니다.
-@st.cache_resource(ttl=3600) # 1시간마다 갱신
+@st.cache_resource(ttl=3600)
 def init_gsheet_connection():
     try:
         creds_dict = dict(st.secrets["connections"]["gsheets"])
         creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
         client = gspread.authorize(creds)
-        # 시트를 미리 열어서 반환 (Spreadsheet 객체 자체를 캐싱)
         sh = client.open(SHEET_NAME)
         return sh
     except Exception as e:
@@ -57,23 +54,19 @@ def init_gsheet_connection():
         return None
 
 def get_worksheet(tab_name):
-    # 캐시된 시트 객체 가져오기
     sh = init_gsheet_connection()
     if sh is None: return None
-    
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
-        # 탭이 없으면 생성
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
             ws.append_row(["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
     except gspread.exceptions.APIError:
-        # API 오류 시 캐시를 지우고 재시도 유도 가능하나, 일단 대기
         time.sleep(1)
-        st.warning("⚠️ 구글 연결이 불안정합니다. 잠시 후 다시 시도해주세요.")
+        st.warning("⚠️ 구글 연결 불안정. 잠시 후 다시 시도하세요.")
         return None
     return ws
 
@@ -84,7 +77,6 @@ def get_sheet_url():
 def init_settings_sheet():
     ws = get_worksheet("설정")
     if ws:
-        # 헤더 확인 로직 (읽기 최소화)
         try:
             headers = ws.row_values(1)
             if not headers or headers != ["Key", "Value"]:
@@ -97,12 +89,10 @@ def init_settings_sheet():
 def load_data(tab_name):
     ws = get_worksheet(tab_name)
     if not ws:
-        # 연결 실패 시 빈 DF 반환하되, 구조는 유지
         cols = []
         if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
         elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
         return pd.DataFrame(columns=cols)
-    
     try:
         data = ws.get_all_records()
         df = pd.DataFrame(data)
@@ -112,13 +102,11 @@ def load_data(tab_name):
             elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
             df = pd.DataFrame(columns=cols)
         return df
-    except:
-        return pd.DataFrame()
+    except: return pd.DataFrame()
 
 def save_row(tab_name, row_data):
     ws = get_worksheet(tab_name)
     if ws:
-        # numpy int64 -> int 변환
         cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
         ws.append_row(cleaned_data)
 
@@ -145,8 +133,7 @@ def update_row_by_id(tab_name, target_id, new_data_list):
             ws.update(range_name=cell_range, values=[cleaned_data])
             return True, "성공"
         return False, "ID 없음"
-    except Exception as e:
-        return False, str(e)
+    except Exception as e: return False, str(e)
 
 def update_faculty_row(target_no, new_dept, new_rank, new_name):
     ws = get_worksheet("재직교수")
@@ -181,7 +168,6 @@ def update_row_by_date(tab_name, target_date, new_data_list):
 DEFAULT_PW = {"admin": "삼막로155", "user": "2601"}
 
 def get_passwords():
-    # 설정 탭 초기화는 한 번만 시도
     init_settings_sheet() 
     df = load_data("설정")
     pw_dict = DEFAULT_PW.copy()
@@ -551,8 +537,14 @@ else:
             st.success("저장 완료!")
             st.info("입력창 초기화?")
             c1, c2 = st.columns(2)
+            # [수정] 초기화 시 누락된 키(mn, md, mr, mc) 추가
             if c1.button("네", key="b_sy"):
-                for k in ["i_t", "i_p", "ki", "final_content", "mn", "i_f"]:
+                keys_to_clear = [
+                    "i_t", "i_p", "ki", "final_content", 
+                    "mn", "md", "mr", "mc", # Manual inputs
+                    "i_f" # Faculty select
+                ]
+                for k in keys_to_clear:
                     if k in st.session_state: del st.session_state[k]
                 st.session_state['save_step'] = 'input'; st.rerun()
             if c2.button("아니오", key="b_sn"):
