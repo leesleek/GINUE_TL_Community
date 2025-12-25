@@ -53,7 +53,6 @@ def get_worksheet(tab_name):
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
-        # 탭 생성 시 기본 헤더 추가
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
@@ -77,14 +76,11 @@ def init_settings_sheet():
         ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
         ws.append_row(["user_pw", DEFAULT_PW["user"]])
 
-# [중요 수정] 데이터 로드 시 빈 DF라도 컬럼명을 강제로 지정하여 KeyError 방지
 def load_data(tab_name):
     try:
         ws = get_worksheet(tab_name)
         data = ws.get_all_records()
         df = pd.DataFrame(data)
-        
-        # 데이터가 비어있을 경우 컬럼 구조 강제 할당
         if df.empty:
             if tab_name == "재직교수":
                 df = pd.DataFrame(columns=["연번", "학과", "직급", "이름"])
@@ -92,7 +88,6 @@ def load_data(tab_name):
                 df = pd.DataFrame(columns=["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
         return df
     except Exception as e:
-        # 에러 발생 시에도 최소한의 구조를 가진 빈 DF 반환
         if tab_name == "재직교수":
             return pd.DataFrame(columns=["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
@@ -404,7 +399,7 @@ with ch2:
         hb1, hb2 = st.columns([1, 1])
         with hb1:
             url = get_sheet_url()
-            if url: st.link_button("📂 시트 열기", url, use_container_width=True)
+            if url: st.link_button("📂 구글 시트 보기", url, use_container_width=True)
             else: st.button("연결 실패", disabled=True, use_container_width=True)
         with hb2:
             if st.button("🚪 로그아웃", use_container_width=True): st.session_state.clear(); st.rerun()
@@ -419,20 +414,33 @@ faculty_options = [f"{row['이름']} ({row['학과']}/{row['직급']})" for idx,
 if st.session_state['user_role'] == 'user':
     st.info("💡 일반사용자는 '회의록 검색'만 가능합니다.")
     st.header("🔍 회의록 검색")
-    sk = st.text_input("검색어", key="sk_usr")
+    c_s1, c_s2 = st.columns([1, 3])
+    with c_s1:
+        st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_usr")
+    with c_s2:
+        sk = st.text_input("검색어 입력", key="sk_usr")
+    
     if sk:
         df = load_data("회의록")
         if not df.empty:
-            mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+            if st_type == "전체":
+                mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+            elif st_type == "이름":
+                mask = df['참석자_텍스트'].str.contains(sk)
+            elif st_type == "학과":
+                mask = df['참석자_텍스트'].str.contains(sk)
+            elif st_type == "주제":
+                mask = df['주제'].str.contains(sk)
+            elif st_type == "내용":
+                mask = df['내용'].str.contains(sk)
+            
             res = df[mask].sort_values(by="날짜", ascending=False)
             st.write(f"결과: {len(res)}건")
-            for idx, row in res.iterrows():
-                with st.expander(f"[{row['날짜']}] {row['주제']}"):
-                    st.write(f"**장소:** {row['장소']} | **참석:** {row['참석자_텍스트']}")
-                    st.text_area("내용", row['내용'], disabled=True, height=200, key=f"u_c_{idx}")
+            # 필요 없는 컬럼 숨기기
+            st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
         else: st.warning("데이터 없음")
 else:
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"])
 
     # 1. 입력
     with tab1:
@@ -557,22 +565,33 @@ else:
                                 st.success("삭제됨"); st.rerun()
             else: st.info("데이터 없음")
 
-    # 3. 검색
+    # 3. 검색 (수정 제거 및 필터 적용)
     with tab3:
         st.header("🔍 회의록 검색")
-        sk = st.text_input("검색어", key="sk_a")
+        c_s1, c_s2 = st.columns([1, 3])
+        with c_s1:
+            st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_adm")
+        with c_s2:
+            sk = st.text_input("검색어 입력", key="sk_a")
+        
         if sk:
             df = load_data("회의록")
             if not df.empty:
-                mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+                if st_type == "전체":
+                    mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+                elif st_type == "이름":
+                    mask = df['참석자_텍스트'].str.contains(sk)
+                elif st_type == "학과":
+                    mask = df['참석자_텍스트'].str.contains(sk)
+                elif st_type == "주제":
+                    mask = df['주제'].str.contains(sk)
+                elif st_type == "내용":
+                    mask = df['내용'].str.contains(sk)
+                
                 res = df[mask].sort_values(by="날짜", ascending=False)
-                st.dataframe(res)
-                for idx, row in res.iterrows():
-                    with st.expander(f"결과: {row['주제']} ({row['날짜']})"):
-                        st.write(f"**일시:** {row['날짜']} {row['시간']}")
-                        st.write(f"**장소:** {row['장소']}")
-                        st.write(f"**참석자:** {row['참석자_텍스트']}")
-                        st.text_area("내용", row['내용'], disabled=True, height=150, key=f"v_c_{idx}")
+                st.write(f"결과: {len(res)}건")
+                st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
+            else: st.warning("데이터 없음")
 
     # 4. 재직교수
     with tab4:
@@ -581,15 +600,21 @@ else:
         with c_r:
             if st.session_state['fac_edit_mode']:
                 st.subheader("수정")
-                target = faculty_df[faculty_df['연번'] == st.session_state['fac_edit_no']].iloc[0]
-                fn = st.text_input("이름", target['이름'], key="fn_e")
-                fd = st.text_input("학과", target['학과'], key="fd_e")
-                fr = st.selectbox("직급", ["교수","부교수","조교수","강사"], index=["교수","부교수","조교수","강사"].index(target['직급']) if target['직급'] in ["교수","부교수","조교수","강사"] else 0, key="fr_e")
-                if st.button("저장", key="b_fe_s"):
-                    update_faculty_row(target['연번'], fd, fr, fn)
-                    st.session_state['fac_edit_mode'] = False; st.rerun()
-                if st.button("취소", key="b_fe_c"):
-                    st.session_state['fac_edit_mode'] = False; st.rerun()
+                # [수정] KeyError 방지를 위한 로직 강화
+                try:
+                    target = faculty_df[faculty_df['연번'].astype(str) == str(st.session_state['fac_edit_no'])].iloc[0]
+                    fn = st.text_input("이름", target['이름'], key="fn_e")
+                    fd = st.text_input("학과", target['학과'], key="fd_e")
+                    fr = st.selectbox("직급", ["교수","부교수","조교수","강사"], index=["교수","부교수","조교수","강사"].index(target['직급']) if target['직급'] in ["교수","부교수","조교수","강사"] else 0, key="fr_e")
+                    
+                    if st.button("저장", key="b_fe_s"):
+                        update_faculty_row(target['연번'], fd, fr, fn)
+                        st.session_state['fac_edit_mode'] = False; st.rerun()
+                    if st.button("취소", key="b_fe_c"):
+                        st.session_state['fac_edit_mode'] = False; st.rerun()
+                except IndexError:
+                    st.error("데이터를 찾을 수 없습니다. 새로고침 해주세요.")
+                    st.session_state['fac_edit_mode'] = False
             else:
                 st.subheader("관리")
                 with st.expander("신규", expanded=True):
@@ -597,17 +622,16 @@ else:
                     fd = st.text_input("학과", key="fd_n")
                     fr = st.selectbox("직급", ["교수","부교수","조교수","강사"], key="fr_n")
                     if st.button("추가", key="b_fa_a"):
-                        # [수정] 빈칸 확인 로직 추가
                         if fn.strip() and fd.strip() and fr:
                             save_row("재직교수", [len(faculty_df)+1, fd, fr, fn])
                             st.success("추가됨"); st.rerun()
-                        else:
-                            st.error("모든 항목을 입력해주세요.")
+                        else: st.error("모든 항목을 입력해주세요.")
                 with st.expander("수정/삭제"):
                     f_no = st.number_input("연번", min_value=1, step=1, key="f_no")
                     c1, c2 = st.columns(2)
                     if c1.button("수정", key="b_f_m"):
-                        if not faculty_df[faculty_df['연번'] == f_no].empty:
+                        # [수정] 타입 맞춰서 검색
+                        if not faculty_df.empty and not faculty_df[faculty_df['연번'].astype(str) == str(f_no)].empty:
                             st.session_state['fac_edit_mode'] = True
                             st.session_state['fac_edit_no'] = f_no
                             st.rerun()
@@ -626,7 +650,9 @@ else:
             if sels:
                 rows = df[df['날짜'].isin(sels)].to_dict('records')
                 rows = sorted(rows, key=lambda x: x['날짜'])
-                st.download_button("CSV", create_csv_export(rows).to_csv(index=False, encoding='utf-8-sig'), "회의록.csv", "text/csv", key="b_c_e")
+                # CSV 한글 깨짐 방지 (utf-8-sig)
+                csv_data = create_csv_export(rows).to_csv(index=False).encode('utf-8-sig')
+                st.download_button("CSV", csv_data, "회의록.csv", "text/csv", key="b_c_e")
                 if st.button("PDF", key="b_p_g"):
                     st.download_button("다운로드", create_signature_pdf(rows), "서명부.pdf", "application/pdf", key="b_p_d")
 
