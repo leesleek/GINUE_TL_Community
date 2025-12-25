@@ -9,6 +9,7 @@ import json
 import io
 import numpy as np
 import time
+import functools # 데코레이터용
 
 # PDF 생성 라이브러리
 from reportlab.pdfgen import canvas
@@ -41,6 +42,26 @@ if "openai" in st.secrets:
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 SHEET_NAME = "교수학습공동체_DB" 
 
+# [핵심] API 재시도 데코레이터 (불안정 해결)
+def retry_api_call(max_retries=3, delay=2):
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            last_exception = None
+            for i in range(max_retries):
+                try:
+                    return func(*args, **kwargs)
+                except (gspread.exceptions.APIError, gspread.exceptions.GSpreadException) as e:
+                    last_exception = e
+                    time.sleep(delay * (i + 1)) # 점진적 대기 (2초, 4초, 6초...)
+                except Exception as e:
+                    raise e
+            st.error(f"⚠️ 구글 연결 실패 (재시도 초과): {last_exception}")
+            return None
+        return wrapper
+    return decorator
+
+# 연결 객체 캐싱 (1시간 유지)
 @st.cache_resource(ttl=3600)
 def init_gsheet_connection():
     try:
@@ -53,148 +74,149 @@ def init_gsheet_connection():
         st.error(f"❌ 구글 시트 연결 실패: {e}")
         return None
 
-def get_worksheet(tab_name):
+# 워크시트 가져오기 (재시도 로직 적용 불가 - sh 객체 필요)
+def get_worksheet_object(tab_name):
     sh = init_gsheet_connection()
     if sh is None: return None
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
+        # 헤더 초기화
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
             ws.append_row(["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
-    except gspread.exceptions.APIError:
-        time.sleep(1)
-        st.warning("⚠️ 구글 연결 불안정. 잠시 후 다시 시도하세요.")
-        return None
     return ws
 
 def get_sheet_url():
     sh = init_gsheet_connection()
     return sh.url if sh else None
 
-def init_settings_sheet():
-    ws = get_worksheet("설정")
-    if ws:
-        try:
-            headers = ws.row_values(1)
-            if not headers or headers != ["Key", "Value"]:
-                ws.clear() 
-                ws.append_row(["Key", "Value"])
-                ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
-                ws.append_row(["user_pw", DEFAULT_PW["user"]])
-        except: pass
-
+# 데이터 로드 (캐싱 + 재시도) - 속도 개선의 핵심
+# ttl=10: 10초 동안은 다시 로드하지 않고 메모리 데이터 사용
+@st.cache_data(ttl=10)
+@retry_api_call(max_retries=3)
 def load_data(tab_name):
-    ws = get_worksheet(tab_name)
+    ws = get_worksheet_object(tab_name)
     
-    # 기본 컬럼 구조 정의 (빈 데이터일 때 사용)
     cols = []
     if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
     elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
 
-    if not ws:
-        return pd.DataFrame(columns=cols)
+    if not ws: return pd.DataFrame(columns=cols)
 
-    try:
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
-        
-        if df.empty:
-            df = pd.DataFrame(columns=cols)
-        
-        # ID 컬럼 누락 방지
-        if tab_name == "회의록" and "ID" not in df.columns:
-             df = pd.DataFrame(columns=cols)
-             
-        return df
-    except: 
-        return pd.DataFrame(columns=cols)
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
+    
+    if df.empty: return pd.DataFrame(columns=cols)
+    if tab_name == "회의록" and "ID" not in df.columns: return pd.DataFrame(columns=cols)
+         
+    return df
 
+# 저장/삭제/업데이트는 캐시를 비워야 함
+@retry_api_call(max_retries=3)
 def save_row(tab_name, row_data):
-    ws = get_worksheet(tab_name)
+    ws = get_worksheet_object(tab_name)
     if ws:
         cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
         ws.append_row(cleaned_data)
+        load_data.clear() # 캐시 초기화 (다음 로드 때 반영)
 
+@retry_api_call(max_retries=3)
 def delete_row(tab_name, id_col_name, target_id):
-    ws = get_worksheet(tab_name)
+    ws = get_worksheet_object(tab_name)
     if not ws: return False
-    try:
-        cell = ws.find(str(target_id))
-        if cell:
-            ws.delete_rows(cell.row)
-            return True
-    except: return False
+    cell = ws.find(str(target_id))
+    if cell:
+        ws.delete_rows(cell.row)
+        load_data.clear() # 캐시 초기화
+        return True
     return False
 
+@retry_api_call(max_retries=3)
 def update_row_by_id(tab_name, target_id, new_data_list):
-    ws = get_worksheet(tab_name)
+    ws = get_worksheet_object(tab_name)
     if not ws: return False, "연결 실패"
-    try:
-        cell = ws.find(str(target_id), in_column=1) 
-        if cell:
-            cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
-            end_col_char = chr(64 + len(cleaned_data))
-            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
-            ws.update(range_name=cell_range, values=[cleaned_data])
-            return True, "성공"
-        return False, "ID 없음"
-    except Exception as e: return False, str(e)
+    cell = ws.find(str(target_id), in_column=1) 
+    if cell:
+        cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
+        end_col_char = chr(64 + len(cleaned_data))
+        cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
+        ws.update(range_name=cell_range, values=[cleaned_data])
+        load_data.clear() # 캐시 초기화
+        return True, "성공"
+    return False, "ID 없음"
 
+@retry_api_call(max_retries=3)
 def update_faculty_row(target_no, new_dept, new_rank, new_name):
-    ws = get_worksheet("재직교수")
+    ws = get_worksheet_object("재직교수")
     if not ws: return False
-    try:
-        cell = ws.find(str(target_no), in_column=1)
-        if cell:
-            ws.update_cell(cell.row, 2, new_dept)
-            ws.update_cell(cell.row, 3, new_rank)
-            ws.update_cell(cell.row, 4, new_name)
-            return True
-        return False
-    except: return False
+    cell = ws.find(str(target_no), in_column=1)
+    if cell:
+        ws.update_cell(cell.row, 2, new_dept)
+        ws.update_cell(cell.row, 3, new_rank)
+        ws.update_cell(cell.row, 4, new_name)
+        load_data.clear()
+        return True
+    return False
 
+@retry_api_call(max_retries=3)
 def update_row_by_date(tab_name, target_date, new_data_list):
-    ws = get_worksheet(tab_name)
+    ws = get_worksheet_object(tab_name)
     if not ws: return False
-    try:
-        cell = ws.find(target_date, in_column=3) 
-        if cell:
-            cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
-            end_col_char = chr(64 + len(cleaned_data))
-            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
-            ws.update(range_name=cell_range, values=[cleaned_data])
-            return True
-        return False
-    except: return False
+    cell = ws.find(target_date, in_column=3) 
+    if cell:
+        cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
+        end_col_char = chr(64 + len(cleaned_data))
+        cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
+        ws.update(range_name=cell_range, values=[cleaned_data])
+        load_data.clear()
+        return True
+    return False
 
 # ---------------------------------------------------------
 # 2. 인증 및 비밀번호
 # ---------------------------------------------------------
 DEFAULT_PW = {"admin": "삼막로155", "user": "2601"}
 
+def init_settings_sheet():
+    # 설정 시트는 자주 바뀌지 않으므로 에러 시 무시
+    try:
+        ws = get_worksheet_object("설정")
+        if ws:
+            headers = ws.row_values(1)
+            if not headers or headers != ["Key", "Value"]:
+                ws.clear() 
+                ws.append_row(["Key", "Value"])
+                ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
+                ws.append_row(["user_pw", DEFAULT_PW["user"]])
+    except: pass
+
 def get_passwords():
-    init_settings_sheet() 
-    df = load_data("설정")
-    pw_dict = DEFAULT_PW.copy()
-    if not df.empty:
-        for idx, row in df.iterrows():
-            if row.get('Key') == 'admin_pw':
-                pw_dict['admin'] = str(row.get('Value'))
-            elif row.get('Key') == 'user_pw':
-                pw_dict['user'] = str(row.get('Value'))
-    return pw_dict
+    init_settings_sheet()
+    # 설정 탭 로드는 캐싱하지 않음 (로그인 직전이라 중요)
+    try:
+        ws = get_worksheet_object("설정")
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        pw_dict = DEFAULT_PW.copy()
+        if not df.empty:
+            for idx, row in df.iterrows():
+                if row.get('Key') == 'admin_pw':
+                    pw_dict['admin'] = str(row.get('Value'))
+                elif row.get('Key') == 'user_pw':
+                    pw_dict['user'] = str(row.get('Value'))
+        return pw_dict
+    except: return DEFAULT_PW
 
 def update_password(role, new_pw):
-    ws = get_worksheet("설정")
+    ws = get_worksheet_object("설정")
     if ws:
         try:
             cell = ws.find(f"{role}_pw")
             if cell: ws.update_cell(cell.row, 2, new_pw)
             else: ws.append_row([f"{role}_pw", new_pw])
-            st.cache_data.clear()
         except: pass
 
 # ---------------------------------------------------------
@@ -301,30 +323,26 @@ def create_csv_export(meeting_rows):
 def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
     st.markdown("---")
     
-    # [수정] 데이터 로드 실패 또는 해당 ID가 없을 경우를 대비한 방어 코드
+    # [방어 로직] 데이터 로드 실패 대비
     if df_m.empty or 'ID' not in df_m.columns:
-        st.warning("⚠️ 데이터를 불러올 수 없습니다. 구글 시트 연결을 확인해주세요.")
-        if st.button("목록으로 돌아가기", key=f"btn_err_back_{key_suffix}"):
+        st.error("데이터 로드 실패. 다시 시도해주세요.")
+        if st.button("돌아가기", key=f"btn_fail_{key_suffix}"):
             if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
             elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
         return
 
-    # ID로 필터링
     filtered_df = df_m[df_m['ID'].astype(str) == str(current_id)]
-    
     if filtered_df.empty:
-        st.warning("⚠️ 선택하신 회의록 데이터를 찾을 수 없습니다. (삭제되었거나 로드 오류)")
-        if st.button("목록으로 돌아가기", key=f"btn_notfound_back_{key_suffix}"):
+        st.warning("데이터를 찾을 수 없습니다.")
+        if st.button("목록으로", key=f"btn_nf_{key_suffix}"):
             if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
             elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
         return
 
-    # 데이터가 존재할 경우에만 iloc 호출
     target_row = filtered_df.iloc[0]
     
-    # 상단 복귀 버튼
     if st.button("⬅️ 수정 취소 및 목록으로 돌아가기", key=f"btn_top_back_{key_suffix}"):
         if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
         elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
@@ -590,7 +608,8 @@ else:
             st.info("입력창 초기화?")
             c1, c2 = st.columns(2)
             if c1.button("네", key="b_sy"):
-                for k in ["i_t", "i_p", "ki", "final_content", "mn", "md", "mr", "mc", "i_f"]:
+                keys_to_clear = ["i_t", "i_p", "ki", "final_content", "mn", "md", "mr", "mc", "i_f"]
+                for k in keys_to_clear:
                     if k in st.session_state: del st.session_state[k]
                 st.session_state['save_step'] = 'input'; st.rerun()
             if c2.button("아니오", key="b_sn"):
