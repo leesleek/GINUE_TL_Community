@@ -94,26 +94,19 @@ def get_sheet_url():
 @retry_api_call(max_retries=3)
 def load_data(tab_name):
     ws = get_worksheet_object(tab_name)
-    
-    # 기본 컬럼 구조 정의
     cols = []
     if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
     elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
 
     if not ws: return pd.DataFrame(columns=cols)
 
-    try:
-        data = ws.get_all_records()
-        df = pd.DataFrame(data)
-        
-        # 빈 데이터프레임 처리
-        if df.empty: return pd.DataFrame(columns=cols)
-        # 필수 컬럼 누락 방어
-        if tab_name == "회의록" and "ID" not in df.columns: return pd.DataFrame(columns=cols)
-        
-        return df
-    except:
-        return pd.DataFrame(columns=cols)
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
+    
+    if df.empty: return pd.DataFrame(columns=cols)
+    if tab_name == "회의록" and "ID" not in df.columns: return pd.DataFrame(columns=cols)
+         
+    return df
 
 @retry_api_call(max_retries=3)
 def save_row(tab_name, row_data):
@@ -178,27 +171,34 @@ def update_row_by_date(tab_name, target_date, new_data_list):
 # ---------------------------------------------------------
 # 2. 인증 및 비밀번호
 # ---------------------------------------------------------
-DEFAULT_PW = {"admin": "삼막로155", "user": "2601"}
+# [수정] DEFAULT_PW 삭제됨. 초기화를 위한 값만 지역변수로 사용.
 
 def init_settings_sheet():
+    """설정 시트가 비어있을 경우 초기값을 생성하는 함수"""
     try:
         ws = get_worksheet_object("설정")
         if ws:
-            headers = ws.row_values(1)
-            if not headers or headers != ["Key", "Value"]:
+            # 헤더 확인
+            current_headers = ws.row_values(1)
+            if not current_headers or current_headers != ["Key", "Value"]:
                 ws.clear() 
                 ws.append_row(["Key", "Value"])
-                ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
-                ws.append_row(["user_pw", DEFAULT_PW["user"]])
+                # [중요] DB가 완전히 비었을 때만 이 초기값을 씁니다.
+                ws.append_row(["admin_pw", "삼막로155"]) 
+                ws.append_row(["user_pw", "2601"])
     except: pass
 
 def get_passwords():
+    """구글 시트에서 비밀번호를 가져옵니다. DB 연결 실패 시 빈 dict 반환."""
     init_settings_sheet()
     try:
         ws = get_worksheet_object("설정")
+        if not ws: return {} # 연결 실패 시 로그인 불가 처리
+        
         data = ws.get_all_records()
         df = pd.DataFrame(data)
-        pw_dict = DEFAULT_PW.copy()
+        pw_dict = {}
+        
         if not df.empty:
             for idx, row in df.iterrows():
                 if row.get('Key') == 'admin_pw':
@@ -206,7 +206,8 @@ def get_passwords():
                 elif row.get('Key') == 'user_pw':
                     pw_dict['user'] = str(row.get('Value'))
         return pw_dict
-    except: return DEFAULT_PW
+    except: 
+        return {} # 에러 발생 시 로그인 불가
 
 def update_password(role, new_pw):
     ws = get_worksheet_object("설정")
@@ -448,9 +449,11 @@ if not st.session_state['logged_in']:
         pw = st.text_input("비밀번호", type="password", key="inp_pw")
         if st.button("로그인", type="primary", key="btn_log"):
             pws = get_passwords()
-            if auth=="관리자" and pw==pws['admin']:
+            if not pws:
+                st.error("DB 연결 실패 또는 설정값 없음.")
+            elif auth=="관리자" and pw==pws.get('admin'):
                 st.session_state['logged_in']=True; st.session_state['user_role']="admin"; st.rerun()
-            elif auth=="일반사용자" and pw==pws['user']:
+            elif auth=="일반사용자" and pw==pws.get('user'):
                 st.session_state['logged_in']=True; st.session_state['user_role']="user"; st.rerun()
             else: st.error("비밀번호 오류")
     st.stop()
@@ -516,7 +519,7 @@ if st.session_state['user_role'] == 'user':
             st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
         else: st.warning("데이터 없음")
 else:
-    # [핵심 수정] 탭 방식(st.tabs)에서 라디오 버튼 방식(st.radio)으로 변경하여 튕김 현상 제거
+    # 탭 대신 라디오 메뉴 사용 (튕김 방지)
     menu = st.radio("메뉴 선택", 
         ["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"], 
         horizontal=True, 
