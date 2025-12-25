@@ -8,6 +8,7 @@ import os
 import json
 import io
 import numpy as np
+import time # 재시도 로직용
 
 # PDF 생성 라이브러리
 from reportlab.pdfgen import canvas
@@ -36,80 +37,106 @@ if "openai" in st.secrets:
     except Exception as e:
         st.error(f"OpenAI 설정 오류: {e}")
 
-# 구글 시트 연결
+# 구글 시트 연결 설정
 SCOPE = ['https://www.googleapis.com/auth/spreadsheets', 'https://www.googleapis.com/auth/drive']
 SHEET_NAME = "교수학습공동체_DB" 
 
-def get_gsheet_client():
-    creds_dict = dict(st.secrets["connections"]["gsheets"])
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
-    client = gspread.authorize(creds)
-    return client
+# [핵심 수정] 연결 객체 캐싱 (API 호출 최적화)
+# 이 함수는 프로그램 실행 중 딱 한 번만 실행되어 연결을 유지합니다.
+@st.cache_resource(ttl=3600) # 1시간마다 갱신
+def init_gsheet_connection():
+    try:
+        creds_dict = dict(st.secrets["connections"]["gsheets"])
+        creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPE)
+        client = gspread.authorize(creds)
+        # 시트를 미리 열어서 반환 (Spreadsheet 객체 자체를 캐싱)
+        sh = client.open(SHEET_NAME)
+        return sh
+    except Exception as e:
+        st.error(f"❌ 구글 시트 연결 실패: {e}")
+        return None
 
 def get_worksheet(tab_name):
-    client = get_gsheet_client()
-    sh = client.open(SHEET_NAME)
+    # 캐시된 시트 객체 가져오기
+    sh = init_gsheet_connection()
+    if sh is None: return None
+    
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
+        # 탭이 없으면 생성
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
         elif tab_name == "회의록":
             ws.append_row(["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
+    except gspread.exceptions.APIError:
+        # API 오류 시 캐시를 지우고 재시도 유도 가능하나, 일단 대기
+        time.sleep(1)
+        st.warning("⚠️ 구글 연결이 불안정합니다. 잠시 후 다시 시도해주세요.")
+        return None
     return ws
 
 def get_sheet_url():
-    try:
-        client = get_gsheet_client()
-        sh = client.open(SHEET_NAME)
-        return sh.url
-    except:
-        return None
+    sh = init_gsheet_connection()
+    return sh.url if sh else None
 
 def init_settings_sheet():
     ws = get_worksheet("설정")
-    headers = ws.row_values(1)
-    if not headers or headers != ["Key", "Value"]:
-        ws.clear() 
-        ws.append_row(["Key", "Value"])
-        ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
-        ws.append_row(["user_pw", DEFAULT_PW["user"]])
+    if ws:
+        # 헤더 확인 로직 (읽기 최소화)
+        try:
+            headers = ws.row_values(1)
+            if not headers or headers != ["Key", "Value"]:
+                ws.clear() 
+                ws.append_row(["Key", "Value"])
+                ws.append_row(["admin_pw", DEFAULT_PW["admin"]])
+                ws.append_row(["user_pw", DEFAULT_PW["user"]])
+        except: pass
 
 def load_data(tab_name):
+    ws = get_worksheet(tab_name)
+    if not ws:
+        # 연결 실패 시 빈 DF 반환하되, 구조는 유지
+        cols = []
+        if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
+        elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
+        return pd.DataFrame(columns=cols)
+    
     try:
-        ws = get_worksheet(tab_name)
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         if df.empty:
-            if tab_name == "재직교수":
-                df = pd.DataFrame(columns=["연번", "학과", "직급", "이름"])
-            elif tab_name == "회의록":
-                df = pd.DataFrame(columns=["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
+            cols = []
+            if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
+            elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
+            df = pd.DataFrame(columns=cols)
         return df
-    except Exception as e:
-        if tab_name == "재직교수":
-            return pd.DataFrame(columns=["연번", "학과", "직급", "이름"])
-        elif tab_name == "회의록":
-            return pd.DataFrame(columns=["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"])
+    except:
         return pd.DataFrame()
 
 def save_row(tab_name, row_data):
     ws = get_worksheet(tab_name)
-    cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
-    ws.append_row(cleaned_data)
+    if ws:
+        # numpy int64 -> int 변환
+        cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
+        ws.append_row(cleaned_data)
 
 def delete_row(tab_name, id_col_name, target_id):
     ws = get_worksheet(tab_name)
-    cell = ws.find(str(target_id))
-    if cell:
-        ws.delete_rows(cell.row)
-        return True
+    if not ws: return False
+    try:
+        cell = ws.find(str(target_id))
+        if cell:
+            ws.delete_rows(cell.row)
+            return True
+    except: return False
     return False
 
 def update_row_by_id(tab_name, target_id, new_data_list):
+    ws = get_worksheet(tab_name)
+    if not ws: return False, "연결 실패"
     try:
-        ws = get_worksheet(tab_name)
         cell = ws.find(str(target_id), in_column=1) 
         if cell:
             cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
@@ -117,13 +144,14 @@ def update_row_by_id(tab_name, target_id, new_data_list):
             cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
             ws.update(range_name=cell_range, values=[cleaned_data])
             return True, "성공"
-        return False, "ID를 찾을 수 없습니다."
+        return False, "ID 없음"
     except Exception as e:
         return False, str(e)
 
 def update_faculty_row(target_no, new_dept, new_rank, new_name):
+    ws = get_worksheet("재직교수")
+    if not ws: return False
     try:
-        ws = get_worksheet("재직교수")
         cell = ws.find(str(target_no), in_column=1)
         if cell:
             ws.update_cell(cell.row, 2, new_dept)
@@ -131,12 +159,12 @@ def update_faculty_row(target_no, new_dept, new_rank, new_name):
             ws.update_cell(cell.row, 4, new_name)
             return True
         return False
-    except:
-        return False
+    except: return False
 
 def update_row_by_date(tab_name, target_date, new_data_list):
+    ws = get_worksheet(tab_name)
+    if not ws: return False
     try:
-        ws = get_worksheet(tab_name)
         cell = ws.find(target_date, in_column=3) 
         if cell:
             cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
@@ -145,8 +173,7 @@ def update_row_by_date(tab_name, target_date, new_data_list):
             ws.update(range_name=cell_range, values=[cleaned_data])
             return True
         return False
-    except:
-        return False
+    except: return False
 
 # ---------------------------------------------------------
 # 2. 인증 및 비밀번호
@@ -154,25 +181,27 @@ def update_row_by_date(tab_name, target_date, new_data_list):
 DEFAULT_PW = {"admin": "삼막로155", "user": "2601"}
 
 def get_passwords():
+    # 설정 탭 초기화는 한 번만 시도
     init_settings_sheet() 
     df = load_data("설정")
     pw_dict = DEFAULT_PW.copy()
-    for idx, row in df.iterrows():
-        if row['Key'] == 'admin_pw':
-            pw_dict['admin'] = str(row['Value'])
-        elif row['Key'] == 'user_pw':
-            pw_dict['user'] = str(row['Value'])
+    if not df.empty:
+        for idx, row in df.iterrows():
+            if row.get('Key') == 'admin_pw':
+                pw_dict['admin'] = str(row.get('Value'))
+            elif row.get('Key') == 'user_pw':
+                pw_dict['user'] = str(row.get('Value'))
     return pw_dict
 
 def update_password(role, new_pw):
     ws = get_worksheet("설정")
-    key_name = f"{role}_pw"
-    cell = ws.find(key_name)
-    if cell:
-        ws.update_cell(cell.row, cell.col + 1, new_pw)
-    else:
-        ws.append_row([key_name, new_pw])
-    st.cache_data.clear()
+    if ws:
+        try:
+            cell = ws.find(f"{role}_pw")
+            if cell: ws.update_cell(cell.row, 2, new_pw)
+            else: ws.append_row([f"{role}_pw", new_pw])
+            st.cache_data.clear()
+        except: pass
 
 # ---------------------------------------------------------
 # 3. 로직 함수 (AI, PDF, CSV)
@@ -415,28 +444,20 @@ if st.session_state['user_role'] == 'user':
     st.info("💡 일반사용자는 '회의록 검색'만 가능합니다.")
     st.header("🔍 회의록 검색")
     c_s1, c_s2 = st.columns([1, 3])
-    with c_s1:
-        st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_usr")
-    with c_s2:
-        sk = st.text_input("검색어 입력", key="sk_usr")
+    with c_s1: st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_usr")
+    with c_s2: sk = st.text_input("검색어 입력", key="sk_usr")
     
     if sk:
         df = load_data("회의록")
         if not df.empty:
-            if st_type == "전체":
-                mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
-            elif st_type == "이름":
-                mask = df['참석자_텍스트'].str.contains(sk)
-            elif st_type == "학과":
-                mask = df['참석자_텍스트'].str.contains(sk)
-            elif st_type == "주제":
-                mask = df['주제'].str.contains(sk)
-            elif st_type == "내용":
-                mask = df['내용'].str.contains(sk)
+            if st_type == "전체": mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+            elif st_type == "이름": mask = df['참석자_텍스트'].str.contains(sk)
+            elif st_type == "학과": mask = df['참석자_텍스트'].str.contains(sk)
+            elif st_type == "주제": mask = df['주제'].str.contains(sk)
+            elif st_type == "내용": mask = df['내용'].str.contains(sk)
             
             res = df[mask].sort_values(by="날짜", ascending=False)
             st.write(f"결과: {len(res)}건")
-            # 필요 없는 컬럼 숨기기
             st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
         else: st.warning("데이터 없음")
 else:
@@ -565,28 +586,21 @@ else:
                                 st.success("삭제됨"); st.rerun()
             else: st.info("데이터 없음")
 
-    # 3. 검색 (수정 제거 및 필터 적용)
+    # 3. 검색
     with tab3:
         st.header("🔍 회의록 검색")
         c_s1, c_s2 = st.columns([1, 3])
-        with c_s1:
-            st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_adm")
-        with c_s2:
-            sk = st.text_input("검색어 입력", key="sk_a")
+        with c_s1: st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_adm")
+        with c_s2: sk = st.text_input("검색어 입력", key="sk_a")
         
         if sk:
             df = load_data("회의록")
             if not df.empty:
-                if st_type == "전체":
-                    mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
-                elif st_type == "이름":
-                    mask = df['참석자_텍스트'].str.contains(sk)
-                elif st_type == "학과":
-                    mask = df['참석자_텍스트'].str.contains(sk)
-                elif st_type == "주제":
-                    mask = df['주제'].str.contains(sk)
-                elif st_type == "내용":
-                    mask = df['내용'].str.contains(sk)
+                if st_type == "전체": mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+                elif st_type == "이름": mask = df['참석자_텍스트'].str.contains(sk)
+                elif st_type == "학과": mask = df['참석자_텍스트'].str.contains(sk)
+                elif st_type == "주제": mask = df['주제'].str.contains(sk)
+                elif st_type == "내용": mask = df['내용'].str.contains(sk)
                 
                 res = df[mask].sort_values(by="날짜", ascending=False)
                 st.write(f"결과: {len(res)}건")
@@ -600,13 +614,11 @@ else:
         with c_r:
             if st.session_state['fac_edit_mode']:
                 st.subheader("수정")
-                # [수정] KeyError 방지를 위한 로직 강화
                 try:
                     target = faculty_df[faculty_df['연번'].astype(str) == str(st.session_state['fac_edit_no'])].iloc[0]
                     fn = st.text_input("이름", target['이름'], key="fn_e")
                     fd = st.text_input("학과", target['학과'], key="fd_e")
                     fr = st.selectbox("직급", ["교수","부교수","조교수","강사"], index=["교수","부교수","조교수","강사"].index(target['직급']) if target['직급'] in ["교수","부교수","조교수","강사"] else 0, key="fr_e")
-                    
                     if st.button("저장", key="b_fe_s"):
                         update_faculty_row(target['연번'], fd, fr, fn)
                         st.session_state['fac_edit_mode'] = False; st.rerun()
@@ -630,7 +642,6 @@ else:
                     f_no = st.number_input("연번", min_value=1, step=1, key="f_no")
                     c1, c2 = st.columns(2)
                     if c1.button("수정", key="b_f_m"):
-                        # [수정] 타입 맞춰서 검색
                         if not faculty_df.empty and not faculty_df[faculty_df['연번'].astype(str) == str(f_no)].empty:
                             st.session_state['fac_edit_mode'] = True
                             st.session_state['fac_edit_no'] = f_no
@@ -650,7 +661,6 @@ else:
             if sels:
                 rows = df[df['날짜'].isin(sels)].to_dict('records')
                 rows = sorted(rows, key=lambda x: x['날짜'])
-                # CSV 한글 깨짐 방지 (utf-8-sig)
                 csv_data = create_csv_export(rows).to_csv(index=False).encode('utf-8-sig')
                 st.download_button("CSV", csv_data, "회의록.csv", "text/csv", key="b_c_e")
                 if st.button("PDF", key="b_p_g"):
