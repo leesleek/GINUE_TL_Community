@@ -52,6 +52,7 @@ def get_worksheet(tab_name):
     try:
         ws = sh.worksheet(tab_name)
     except gspread.WorksheetNotFound:
+        # 재직교수 탭이면 헤더 자동 생성
         ws = sh.add_worksheet(title=tab_name, rows=100, cols=10)
         if tab_name == "재직교수":
             ws.append_row(["연번", "학과", "직급", "이름"])
@@ -80,6 +81,7 @@ def load_data(tab_name):
         data = ws.get_all_records()
         return pd.DataFrame(data)
     except Exception as e:
+        # 데이터가 없거나 헤더 문제 시 빈 DF 반환
         return pd.DataFrame()
 
 def save_row(tab_name, row_data):
@@ -95,22 +97,30 @@ def delete_row(tab_name, id_col_name, target_id):
     return False
 
 def update_row_by_id(tab_name, target_id, new_data_list):
-    ws = get_worksheet(tab_name)
+    """ID(1열)를 기준으로 전체 행 업데이트"""
     try:
+        ws = get_worksheet(tab_name)
         cell = ws.find(str(target_id), in_column=1) 
         if cell:
-            cell_range = f"A{cell.row}:{chr(64+len(new_data_list))}{cell.row}"
+            # A열부터 데이터 길이만큼의 열까지 범위 지정 (예: A2:J2)
+            end_col_char = chr(64 + len(new_data_list)) # Z열 넘어가는 경우 고려 안함(현재 컬럼 수 적음)
+            # 만약 컬럼이 많으면 gspread.utils.rowcol_to_a1 함수 사용 권장하나, 여기선 약식으로 처리
+            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
+            
+            # 값 업데이트 (리스트의 리스트 형태로 전달)
             ws.update(range_name=cell_range, values=[new_data_list])
-            return True
-        return False
-    except:
-        return False
+            return True, "성공"
+        return False, "ID를 찾을 수 없습니다."
+    except Exception as e:
+        return False, str(e)
 
 def update_faculty_row(target_no, new_dept, new_rank, new_name):
-    ws = get_worksheet("재직교수")
+    """재직교수 정보 수정 (연번 기준)"""
     try:
-        cell = ws.find(str(target_no), in_column=1)
+        ws = get_worksheet("재직교수")
+        cell = ws.find(str(target_no), in_column=1) # 연번은 A열
         if cell:
+            # B열(학과), C열(직급), D열(이름) 업데이트
             ws.update_cell(cell.row, 2, new_dept)
             ws.update_cell(cell.row, 3, new_rank)
             ws.update_cell(cell.row, 4, new_name)
@@ -120,11 +130,12 @@ def update_faculty_row(target_no, new_dept, new_rank, new_name):
         return False
 
 def update_row_by_date(tab_name, target_date, new_data_list):
-    ws = get_worksheet(tab_name)
     try:
+        ws = get_worksheet(tab_name)
         cell = ws.find(target_date, in_column=3) 
         if cell:
-            cell_range = f"A{cell.row}:{chr(64+len(new_data_list))}{cell.row}"
+            end_col_char = chr(64 + len(new_data_list))
+            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
             ws.update(range_name=cell_range, values=[new_data_list])
             return True
         return False
@@ -203,17 +214,21 @@ def create_signature_pdf(meeting_rows):
     for i, meeting in enumerate(meeting_rows):
         if i > 0: c.showPage()
         
+        # 날짜 포맷팅 (PDF 양식 준수: 2025년 9월 1일(월요일) 12시 00분 - 12시 50분)
         try:
             dt = datetime.strptime(meeting['날짜'], "%Y-%m-%d")
             days = ["월", "화", "수", "목", "금", "토", "일"]
             day_str = days[dt.weekday()]
+            
             time_parts = meeting['시간'].split('~')
             start_t = time_parts[0].strip().replace(":", "시 ") + "분"
             end_t = time_parts[1].strip().replace(":", "시 ") + "분"
+            
             full_date_str = f"{dt.year}년 {dt.month}월 {dt.day}일({day_str}요일) {start_t} - {end_t}"
         except:
             full_date_str = f"{meeting['날짜']} {meeting['시간']}"
 
+        # 머리글 및 제목
         c.setFont(font_name, 14)
         c.drawString(20 * mm, height - 25 * mm, "<교수학습방법개선 공동체 운영>") 
         c.setFont(font_name, 20)
@@ -222,6 +237,7 @@ def create_signature_pdf(meeting_rows):
         c.drawString(25 * mm, height - 65 * mm, f"■ 일시: {full_date_str}")
         c.drawString(25 * mm, height - 73 * mm, f"■ 장소: {meeting['장소']}")
 
+        # 표 데이터 구성
         table_data = [["연번", "소속학과명", "직급", "성명", "자필서명\n(도장날인X)", "비고"]]
         attendees = []
         try:
@@ -233,6 +249,7 @@ def create_signature_pdf(meeting_rows):
         while len(table_data) < 11:
              table_data.append(["", "", "", "", "", ""])
 
+        # 표 스타일
         t = Table(table_data, colWidths=[15*mm, 40*mm, 30*mm, 30*mm, 45*mm, 20*mm], rowHeights=13*mm)
         t.setStyle(TableStyle([
             ('FONT', (0, 0), (-1, -1), font_name, 10),
@@ -251,31 +268,46 @@ def create_signature_pdf(meeting_rows):
 def create_csv_export(meeting_rows):
     export_list = []
     for meeting in meeting_rows:
+        # 날짜 포맷팅 (CSV 양식 준수: 25.9.1.(월), 12_13시)
         try:
             dt = datetime.strptime(meeting['날짜'], "%Y-%m-%d")
             days = ["월", "화", "수", "목", "금", "토", "일"]
             short_year = dt.year % 100
+            
             time_parts = meeting['시간'].split('~')
             start_h = time_parts[0].split(':')[0].strip()
             end_h = time_parts[1].split(':')[0].strip()
+            
             formatted_date = f"{short_year}.{dt.month}.{dt.day}.({days[dt.weekday()]}), {start_h}_{end_h}시"
         except:
             formatted_date = f"{meeting['날짜']}, {meeting['시간']}"
             
+        # 참석자 줄바꿈 처리 (엑셀 Alt+Enter 효과)
         attendees_str = meeting['참석자_텍스트'].replace(", ", "\n").replace(",", "\n")
+        
         export_list.append({
-            "일시": formatted_date, "장소": meeting['장소'], "주제": meeting['주제'],
-            "참석자(3명 이상)": attendees_str, "회의 내용(2줄 이상, 구체적으로 작성)": meeting['내용'],
+            "일시": formatted_date, 
+            "장소": meeting['장소'], 
+            "주제": meeting['주제'],
+            "참석자(3명 이상)": attendees_str, 
+            "회의 내용(2줄 이상, 구체적으로 작성)": meeting['내용'],
             "증빙자료": "서명부\n첨부"
         })
     return pd.DataFrame(export_list)
 
 # ---------------------------------------------------------
-# 4. 공통: 회의록 수정 폼 렌더링 함수 (Key 충돌 방지 적용)
+# 4. 공통: 회의록 수정 폼 렌더링 함수 (Key 충돌 방지 및 상태 초기화)
 # ---------------------------------------------------------
 def render_meeting_edit_form(df_m, faculty_options, key_suffix):
     """key_suffix를 통해 탭 간 ID 충돌 방지"""
     st.markdown("---")
+    
+    # 상단에 '목록으로 돌아가기' 버튼 추가 (검색 탭 등에서 유용)
+    if st.button("⬅️ 수정 취소 및 목록으로 돌아가기", key=f"btn_top_back_{key_suffix}"):
+        st.session_state['edit_mode'] = False
+        st.session_state['edit_id'] = None
+        st.rerun()
+
     st.subheader(f"✏️ 회의록 수정 (ID: {st.session_state['edit_id']})")
     
     target_row = df_m[df_m['ID'].astype(str) == str(st.session_state['edit_id'])].iloc[0]
@@ -291,7 +323,6 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix):
         end_obj = datetime.strptime("13:00", "%H:%M")
 
     ce1, ce2, ce3 = st.columns(3)
-    # [수정] 모든 위젯 Key에 key_suffix 추가
     e_date = ce1.date_input("날짜", date_obj, key=f"ed_d_{key_suffix}")
     e_start = ce2.time_input("시작", start_obj, key=f"ed_s_{key_suffix}")
     e_end = ce3.time_input("종료", end_obj, key=f"ed_e_{key_suffix}")
@@ -347,13 +378,14 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix):
             final_txt, final_json, e_content, target_row['키워드']
         ]
         
-        if update_row_by_id("회의록", target_row['ID'], updated_row):
+        success, msg = update_row_by_id("회의록", target_row['ID'], updated_row)
+        if success:
             st.success("수정되었습니다.")
             st.session_state['edit_mode'] = False
             st.session_state['edit_id'] = None
             st.rerun()
         else:
-            st.error("수정 실패")
+            st.error(f"수정 실패: {msg}")
 
     if col_cancel.button("취소", key=f"btn_cc_{key_suffix}"):
         st.session_state['edit_mode'] = False
@@ -640,7 +672,10 @@ else:
             if sels:
                 t_rows = df_o[df_o['날짜'].isin(sels)].to_dict('records')
                 t_rows = sorted(t_rows, key=lambda x: x['날짜'])
-                st.download_button("CSV", create_csv_export(t_rows).to_csv(index=False, encoding='utf-8-sig'), "회의록.csv", "text/csv", key="btn_csv_exp")
+                # [수정] encoding='utf-8-sig' + .encode() 사용하여 한글 깨짐 방지
+                csv_data = create_csv_export(t_rows).to_csv(index=False).encode('utf-8-sig')
+                st.download_button("CSV", csv_data, "회의록.csv", "text/csv", key="btn_csv_exp")
+                
                 if st.button("PDF", key="btn_pdf_gen"):
                     st.download_button("다운로드", create_signature_pdf(t_rows), "서명부.pdf", "application/pdf", key="btn_pdf_dl")
 
