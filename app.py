@@ -94,19 +94,26 @@ def get_sheet_url():
 @retry_api_call(max_retries=3)
 def load_data(tab_name):
     ws = get_worksheet_object(tab_name)
+    
+    # 기본 컬럼 구조 정의
     cols = []
     if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
     elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
 
     if not ws: return pd.DataFrame(columns=cols)
 
-    data = ws.get_all_records()
-    df = pd.DataFrame(data)
-    
-    if df.empty: return pd.DataFrame(columns=cols)
-    if tab_name == "회의록" and "ID" not in df.columns: return pd.DataFrame(columns=cols)
-         
-    return df
+    try:
+        data = ws.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # 빈 데이터프레임 처리
+        if df.empty: return pd.DataFrame(columns=cols)
+        # 필수 컬럼 누락 방어
+        if tab_name == "회의록" and "ID" not in df.columns: return pd.DataFrame(columns=cols)
+        
+        return df
+    except:
+        return pd.DataFrame(columns=cols)
 
 @retry_api_call(max_retries=3)
 def save_row(tab_name, row_data):
@@ -314,7 +321,6 @@ def create_csv_export(meeting_rows):
 def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
     st.markdown("---")
     
-    # [방어 로직]
     if df_m.empty or 'ID' not in df_m.columns:
         st.warning("⚠️ 데이터를 불러올 수 없습니다.")
         if st.button("목록으로 돌아가기", key=f"btn_err_back_{key_suffix}"):
@@ -335,7 +341,6 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
 
     target_row = filtered_df.iloc[0]
     
-    # 상단 복귀 버튼
     if st.button("⬅️ 수정 취소 및 목록으로 돌아가기", key=f"btn_top_back_{key_suffix}"):
         if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
         elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
@@ -427,7 +432,6 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
 # ---------------------------------------------------------
 if 'logged_in' not in st.session_state: st.session_state['logged_in'] = False
 if 'user_role' not in st.session_state: st.session_state['user_role'] = None
-if 'generated_content' not in st.session_state: st.session_state['generated_content'] = ""
 if 'save_step' not in st.session_state: st.session_state['save_step'] = 'input'
 if 'temp_data' not in st.session_state: st.session_state['temp_data'] = None
 if 'mng_edit_id' not in st.session_state: st.session_state['mng_edit_id'] = None
@@ -512,10 +516,16 @@ if st.session_state['user_role'] == 'user':
             st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
         else: st.warning("데이터 없음")
 else:
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"])
+    # [핵심 수정] 탭 방식(st.tabs)에서 라디오 버튼 방식(st.radio)으로 변경하여 튕김 현상 제거
+    menu = st.radio("메뉴 선택", 
+        ["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"], 
+        horizontal=True, 
+        label_visibility="collapsed"
+    )
+    st.markdown("---")
 
     # 1. 입력
-    with tab1:
+    if menu == "📝 회의록 입력":
         st.header("회의록 입력")
         c1, c2, c3 = st.columns(3)
         d_in = c1.date_input("날짜", datetime.today(), key="i_d")
@@ -611,7 +621,7 @@ else:
                 st.session_state['save_step'] = 'input'; st.rerun()
 
     # 2. 관리
-    with tab2:
+    elif menu == "🗂️ 회의록 관리":
         st.header("🗂️ 회의록 관리")
         if st.button("🔄 새로고침", key="ref_m"): st.rerun()
         df_m = load_data("회의록")
@@ -639,7 +649,7 @@ else:
             else: st.info("데이터 없음")
 
     # 3. 검색
-    with tab3:
+    elif menu == "🔍 회의록 검색":
         st.header("🔍 회의록 검색")
         c_s1, c_s2 = st.columns([1, 3])
         with c_s1: st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_adm")
@@ -660,7 +670,7 @@ else:
             else: st.warning("데이터 없음")
 
     # 4. 재직교수
-    with tab4:
+    elif menu == "👥 재직교수":
         c_l, c_r = st.columns([2, 1])
         with c_l: st.dataframe(faculty_df, use_container_width=True, hide_index=True)
         with c_r:
@@ -705,7 +715,7 @@ else:
                         else: st.error("해당 연번 없음")
 
     # 5. 출력
-    with tab5:
+    elif menu == "🖨️ 출력":
         df = load_data("회의록")
         if not df.empty:
             dates = sorted(df['날짜'].unique().tolist(), reverse=True)
@@ -719,7 +729,7 @@ else:
                     st.download_button("다운로드", create_signature_pdf(rows), "서명부.pdf", "application/pdf", key="b_p_d")
 
     # 6. 설정
-    with tab6:
+    elif menu == "⚙️ 설정":
         st.header("⚙️ 비밀번호")
         c1, c2 = st.columns(2)
         with c1:
