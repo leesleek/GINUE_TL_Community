@@ -7,6 +7,7 @@ from openai import OpenAI
 import os
 import json
 import io
+import numpy as np # 타입 체크용
 
 # PDF 생성 라이브러리
 from reportlab.pdfgen import canvas
@@ -81,12 +82,13 @@ def load_data(tab_name):
         data = ws.get_all_records()
         return pd.DataFrame(data)
     except Exception as e:
-        # 데이터가 없거나 헤더 문제 시 빈 DF 반환
         return pd.DataFrame()
 
 def save_row(tab_name, row_data):
     ws = get_worksheet(tab_name)
-    ws.append_row(row_data)
+    # [수정] 저장 전 numpy 타입(int64)을 Python native type으로 변환
+    cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in row_data]
+    ws.append_row(cleaned_data)
 
 def delete_row(tab_name, id_col_name, target_id):
     ws = get_worksheet(tab_name)
@@ -102,13 +104,12 @@ def update_row_by_id(tab_name, target_id, new_data_list):
         ws = get_worksheet(tab_name)
         cell = ws.find(str(target_id), in_column=1) 
         if cell:
-            # A열부터 데이터 길이만큼의 열까지 범위 지정 (예: A2:J2)
-            end_col_char = chr(64 + len(new_data_list)) # Z열 넘어가는 경우 고려 안함(현재 컬럼 수 적음)
-            # 만약 컬럼이 많으면 gspread.utils.rowcol_to_a1 함수 사용 권장하나, 여기선 약식으로 처리
-            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
+            # [수정] numpy int64 오류 방지 변환
+            cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
             
-            # 값 업데이트 (리스트의 리스트 형태로 전달)
-            ws.update(range_name=cell_range, values=[new_data_list])
+            end_col_char = chr(64 + len(cleaned_data))
+            cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
+            ws.update(range_name=cell_range, values=[cleaned_data])
             return True, "성공"
         return False, "ID를 찾을 수 없습니다."
     except Exception as e:
@@ -118,9 +119,8 @@ def update_faculty_row(target_no, new_dept, new_rank, new_name):
     """재직교수 정보 수정 (연번 기준)"""
     try:
         ws = get_worksheet("재직교수")
-        cell = ws.find(str(target_no), in_column=1) # 연번은 A열
+        cell = ws.find(str(target_no), in_column=1)
         if cell:
-            # B열(학과), C열(직급), D열(이름) 업데이트
             ws.update_cell(cell.row, 2, new_dept)
             ws.update_cell(cell.row, 3, new_rank)
             ws.update_cell(cell.row, 4, new_name)
@@ -134,9 +134,12 @@ def update_row_by_date(tab_name, target_date, new_data_list):
         ws = get_worksheet(tab_name)
         cell = ws.find(target_date, in_column=3) 
         if cell:
-            end_col_char = chr(64 + len(new_data_list))
+            # [수정] numpy int64 오류 방지
+            cleaned_data = [int(x) if isinstance(x, (np.integer, np.int64)) else x for x in new_data_list]
+            
+            end_col_char = chr(64 + len(cleaned_data))
             cell_range = f"A{cell.row}:{end_col_char}{cell.row}"
-            ws.update(range_name=cell_range, values=[new_data_list])
+            ws.update(range_name=cell_range, values=[cleaned_data])
             return True
         return False
     except:
@@ -214,12 +217,12 @@ def create_signature_pdf(meeting_rows):
     for i, meeting in enumerate(meeting_rows):
         if i > 0: c.showPage()
         
-        # 날짜 포맷팅 (PDF 양식 준수: 2025년 9월 1일(월요일) 12시 00분 - 12시 50분)
         try:
             dt = datetime.strptime(meeting['날짜'], "%Y-%m-%d")
             days = ["월", "화", "수", "목", "금", "토", "일"]
             day_str = days[dt.weekday()]
             
+            # 시간 포맷 (DB: 12:00 ~ 13:00) -> PDF용
             time_parts = meeting['시간'].split('~')
             start_t = time_parts[0].strip().replace(":", "시 ") + "분"
             end_t = time_parts[1].strip().replace(":", "시 ") + "분"
@@ -228,7 +231,6 @@ def create_signature_pdf(meeting_rows):
         except:
             full_date_str = f"{meeting['날짜']} {meeting['시간']}"
 
-        # 머리글 및 제목
         c.setFont(font_name, 14)
         c.drawString(20 * mm, height - 25 * mm, "<교수학습방법개선 공동체 운영>") 
         c.setFont(font_name, 20)
@@ -237,7 +239,6 @@ def create_signature_pdf(meeting_rows):
         c.drawString(25 * mm, height - 65 * mm, f"■ 일시: {full_date_str}")
         c.drawString(25 * mm, height - 73 * mm, f"■ 장소: {meeting['장소']}")
 
-        # 표 데이터 구성
         table_data = [["연번", "소속학과명", "직급", "성명", "자필서명\n(도장날인X)", "비고"]]
         attendees = []
         try:
@@ -249,7 +250,6 @@ def create_signature_pdf(meeting_rows):
         while len(table_data) < 11:
              table_data.append(["", "", "", "", "", ""])
 
-        # 표 스타일
         t = Table(table_data, colWidths=[15*mm, 40*mm, 30*mm, 30*mm, 45*mm, 20*mm], rowHeights=13*mm)
         t.setStyle(TableStyle([
             ('FONT', (0, 0), (-1, -1), font_name, 10),
@@ -268,21 +268,21 @@ def create_signature_pdf(meeting_rows):
 def create_csv_export(meeting_rows):
     export_list = []
     for meeting in meeting_rows:
-        # 날짜 포맷팅 (CSV 양식 준수: 25.9.1.(월), 12_13시)
         try:
             dt = datetime.strptime(meeting['날짜'], "%Y-%m-%d")
             days = ["월", "화", "수", "목", "금", "토", "일"]
             short_year = dt.year % 100
             
-            time_parts = meeting['시간'].split('~')
-            start_h = time_parts[0].split(':')[0].strip()
-            end_h = time_parts[1].split(':')[0].strip()
+            # [수정] CSV 시간 포맷 요구사항 반영 (12:30 ~ 14:15)
+            # DB에는 "12:30 ~ 14:15" 형태로 이미 저장되어 있음.
+            # 하지만 혹시 모르니 공백 등 정리
+            time_str = meeting['시간'].replace(" ", "") # 공백제거 후
+            time_str = time_str.replace("~", " ~ ")   # 보기 좋게 띄어쓰기
             
-            formatted_date = f"{short_year}.{dt.month}.{dt.day}.({days[dt.weekday()]}), {start_h}_{end_h}시"
+            formatted_date = f"{short_year}.{dt.month}.{dt.day}.({days[dt.weekday()]}), {time_str}"
         except:
             formatted_date = f"{meeting['날짜']}, {meeting['시간']}"
             
-        # 참석자 줄바꿈 처리 (엑셀 Alt+Enter 효과)
         attendees_str = meeting['참석자_텍스트'].replace(", ", "\n").replace(",", "\n")
         
         export_list.append({
@@ -296,21 +296,25 @@ def create_csv_export(meeting_rows):
     return pd.DataFrame(export_list)
 
 # ---------------------------------------------------------
-# 4. 공통: 회의록 수정 폼 렌더링 함수 (Key 충돌 방지 및 상태 초기화)
+# 4. 공통: 회의록 수정 폼 렌더링 함수
 # ---------------------------------------------------------
-def render_meeting_edit_form(df_m, faculty_options, key_suffix):
-    """key_suffix를 통해 탭 간 ID 충돌 방지"""
+def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
+    """
+    key_suffix: mng(관리), sch(검색) 등 탭 구분자
+    current_id: 현재 수정 중인 ID
+    """
     st.markdown("---")
     
-    # 상단에 '목록으로 돌아가기' 버튼 추가 (검색 탭 등에서 유용)
+    # 목록 돌아가기 버튼
     if st.button("⬅️ 수정 취소 및 목록으로 돌아가기", key=f"btn_top_back_{key_suffix}"):
-        st.session_state['edit_mode'] = False
-        st.session_state['edit_id'] = None
+        # [수정] 해당 탭의 수정 상태만 초기화
+        if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+        elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
         st.rerun()
 
-    st.subheader(f"✏️ 회의록 수정 (ID: {st.session_state['edit_id']})")
+    st.subheader(f"✏️ 회의록 수정 (ID: {current_id})")
     
-    target_row = df_m[df_m['ID'].astype(str) == str(st.session_state['edit_id'])].iloc[0]
+    target_row = df_m[df_m['ID'].astype(str) == str(current_id)].iloc[0]
     
     try:
         date_obj = datetime.strptime(target_row['날짜'], "%Y-%m-%d")
@@ -372,24 +376,33 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix):
             final_json = json.dumps(att_struct, ensure_ascii=False)
             final_txt = ", ".join(att_txt)
 
+        # [수정] int casting added to prevent int64 error
         updated_row = [
-            str(target_row['ID']), target_row['연번'], e_date.strftime("%Y-%m-%d"),
-            f"{e_start.strftime('%H:%M')} ~ {e_end.strftime('%H:%M')}", e_place, e_topic,
-            final_txt, final_json, e_content, target_row['키워드']
+            str(target_row['ID']), 
+            int(target_row['연번']), # Cast to int
+            e_date.strftime("%Y-%m-%d"),
+            f"{e_start.strftime('%H:%M')} ~ {e_end.strftime('%H:%M')}", 
+            e_place, 
+            e_topic,
+            final_txt, 
+            final_json, 
+            e_content, 
+            target_row['키워드']
         ]
         
         success, msg = update_row_by_id("회의록", target_row['ID'], updated_row)
         if success:
             st.success("수정되었습니다.")
-            st.session_state['edit_mode'] = False
-            st.session_state['edit_id'] = None
+            # 해당 탭의 수정 상태 초기화
+            if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+            elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
             st.rerun()
         else:
             st.error(f"수정 실패: {msg}")
 
     if col_cancel.button("취소", key=f"btn_cc_{key_suffix}"):
-        st.session_state['edit_mode'] = False
-        st.session_state['edit_id'] = None
+        if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+        elif key_suffix == 'sch': st.session_state['sch_edit_id'] = None
         st.rerun()
 
 # ---------------------------------------------------------
@@ -402,10 +415,11 @@ if 'generated_content' not in st.session_state: st.session_state['generated_cont
 if 'save_step' not in st.session_state: st.session_state['save_step'] = 'input'
 if 'temp_data' not in st.session_state: st.session_state['temp_data'] = None
 
-if 'edit_mode' not in st.session_state: st.session_state['edit_mode'] = False
-if 'edit_id' not in st.session_state: st.session_state['edit_id'] = None
-if 'del_confirm_id' not in st.session_state: st.session_state['del_confirm_id'] = None
+# [수정] 수정 상태를 탭별로 분리하여 관리
+if 'mng_edit_id' not in st.session_state: st.session_state['mng_edit_id'] = None
+if 'sch_edit_id' not in st.session_state: st.session_state['sch_edit_id'] = None
 
+if 'del_confirm_id' not in st.session_state: st.session_state['del_confirm_id'] = None
 if 'fac_edit_mode' not in st.session_state: st.session_state['fac_edit_mode'] = False
 if 'fac_edit_no' not in st.session_state: st.session_state['fac_edit_no'] = None
 
@@ -581,8 +595,9 @@ else:
         if st.button("🔄 새로고침", key="ref_tab2"): st.rerun()
         df_m = load_data("회의록")
         
-        if st.session_state['edit_mode'] and st.session_state['edit_id']:
-            render_meeting_edit_form(df_m, faculty_options, key_suffix="mng")
+        # [수정] 관리 탭 전용 state 사용 (mng_edit_id)
+        if st.session_state['mng_edit_id']:
+            render_meeting_edit_form(df_m, faculty_options, key_suffix="mng", current_id=st.session_state['mng_edit_id'])
         else:
             if not df_m.empty:
                 df_m = df_m.sort_values(by="날짜", ascending=False)
@@ -591,8 +606,7 @@ else:
                         st.write(f"내용: {row['내용'][:50]}...")
                         c_e, c_d = st.columns([1, 1])
                         if c_e.button("✏️ 수정", key=f"e_mng_{row['ID']}_{idx}"):
-                            st.session_state['edit_mode'] = True
-                            st.session_state['edit_id'] = row['ID']
+                            st.session_state['mng_edit_id'] = row['ID']
                             st.rerun()
                         if c_d.button("🗑️ 삭제", key=f"d_mng_{row['ID']}_{idx}"):
                             st.session_state['del_confirm_id'] = row['ID']
@@ -611,9 +625,10 @@ else:
         st.header("🔍 검색 및 수정")
         sk = st.text_input("검색어", key="search_adm_inp")
         
-        if st.session_state['edit_mode'] and st.session_state['edit_id']:
+        # [수정] 검색 탭 전용 state 사용 (sch_edit_id)
+        if st.session_state['sch_edit_id']:
             df_m_search = load_data("회의록")
-            render_meeting_edit_form(df_m_search, faculty_options, key_suffix="sch")
+            render_meeting_edit_form(df_m_search, faculty_options, key_suffix="sch", current_id=st.session_state['sch_edit_id'])
         else:
             if sk:
                 df_s = load_data("회의록")
@@ -623,8 +638,7 @@ else:
                     for idx, row in res.iterrows():
                         with st.expander(f"결과: {row['주제']} ({row['날짜']})"):
                              if st.button("✏️ 수정", key=f"e_sch_{row['ID']}_{idx}"):
-                                 st.session_state['edit_mode'] = True
-                                 st.session_state['edit_id'] = row['ID']
+                                 st.session_state['sch_edit_id'] = row['ID']
                                  st.rerun()
 
     # 4. 재직교수
@@ -672,10 +686,7 @@ else:
             if sels:
                 t_rows = df_o[df_o['날짜'].isin(sels)].to_dict('records')
                 t_rows = sorted(t_rows, key=lambda x: x['날짜'])
-                # [수정] encoding='utf-8-sig' + .encode() 사용하여 한글 깨짐 방지
-                csv_data = create_csv_export(t_rows).to_csv(index=False).encode('utf-8-sig')
-                st.download_button("CSV", csv_data, "회의록.csv", "text/csv", key="btn_csv_exp")
-                
+                st.download_button("CSV", create_csv_export(t_rows).to_csv(index=False, encoding='utf-8-sig'), "회의록.csv", "text/csv", key="btn_csv_exp")
                 if st.button("PDF", key="btn_pdf_gen"):
                     st.download_button("다운로드", create_signature_pdf(t_rows), "서명부.pdf", "application/pdf", key="btn_pdf_dl")
 
