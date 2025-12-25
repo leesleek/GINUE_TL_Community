@@ -86,23 +86,36 @@ def init_settings_sheet():
                 ws.append_row(["user_pw", DEFAULT_PW["user"]])
         except: pass
 
+# [수정] 데이터 로드 시 컬럼 누락 방지 강화
 def load_data(tab_name):
     ws = get_worksheet(tab_name)
+    
+    # 기본 컬럼 정의
+    cols = []
+    if tab_name == "재직교수": 
+        cols = ["연번", "학과", "직급", "이름"]
+    elif tab_name == "회의록": 
+        cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
+
     if not ws:
-        cols = []
-        if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
-        elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
         return pd.DataFrame(columns=cols)
+
     try:
         data = ws.get_all_records()
         df = pd.DataFrame(data)
-        if df.empty:
-            cols = []
-            if tab_name == "재직교수": cols = ["연번", "학과", "직급", "이름"]
-            elif tab_name == "회의록": cols = ["ID", "연번", "날짜", "시간", "장소", "주제", "참석자_텍스트", "참석자_JSON", "내용", "키워드"]
+        
+        # 데이터가 비었거나 컬럼이 하나도 없으면 강제로 컬럼 설정
+        if df.empty or len(df.columns) == 0:
             df = pd.DataFrame(columns=cols)
+        
+        # [중요] 특정 필수 컬럼이 없는 경우(헤더 손상 등) 대비
+        if tab_name == "회의록" and "ID" not in df.columns:
+            # 빈 데이터프레임으로 리셋하거나 경고 (여기선 빈 DF 리턴하여 에러 방지)
+            return pd.DataFrame(columns=cols)
+            
         return df
-    except: return pd.DataFrame()
+    except: 
+        return pd.DataFrame(columns=cols)
 
 def save_row(tab_name, row_data):
     ws = get_worksheet(tab_name)
@@ -297,7 +310,23 @@ def render_meeting_edit_form(df_m, faculty_options, key_suffix, current_id):
         st.rerun()
 
     st.subheader(f"✏️ 회의록 수정 (ID: {current_id})")
-    target_row = df_m[df_m['ID'].astype(str) == str(current_id)].iloc[0]
+    
+    # [수정] KeyError 방지: ID 컬럼이 없거나 해당 ID가 없을 경우 안전하게 처리
+    if 'ID' not in df_m.columns:
+        st.error("데이터 오류: 'ID' 컬럼을 찾을 수 없습니다. 구글 시트 헤더를 확인해주세요.")
+        return
+
+    # ID 매칭
+    filtered_df = df_m[df_m['ID'].astype(str) == str(current_id)]
+    
+    if filtered_df.empty:
+        st.error(f"해당 ID({current_id})의 데이터를 찾을 수 없습니다. 이미 삭제되었을 수 있습니다.")
+        if st.button("목록으로 복귀", key=f"btn_error_back_{key_suffix}"):
+            if key_suffix == 'mng': st.session_state['mng_edit_id'] = None
+            st.rerun()
+        return
+
+    target_row = filtered_df.iloc[0]
     
     try:
         date_obj = datetime.strptime(target_row['날짜'], "%Y-%m-%d")
@@ -426,21 +455,18 @@ st.divider()
 faculty_df = load_data("재직교수")
 faculty_options = [f"{row['이름']} ({row['학과']}/{row['직급']})" for idx, row in faculty_df.iterrows()] if not faculty_df.empty else []
 
-# [수정] 일반 사용자 모드 개선
+# 일반 사용자 모드 (개요 + 검색)
 if st.session_state['user_role'] == 'user':
-    # 1. 회의록 개요 (일자별)
     st.header("📅 회의록 일자별 개요")
     df = load_data("회의록")
     
     if not df.empty:
-        # 날짜 내림차순 정렬
+        # 날짜 내림차순
         df_overview = df.sort_values(by="날짜", ascending=False)
-        
-        # 표시할 컬럼 선택 및 설정
-        display_cols = ['날짜', '시간', '주제', '참석자_텍스트']
-        
+        # 표시 컬럼
+        disp_cols = ['날짜', '시간', '주제', '참석자_텍스트']
         st.dataframe(
-            df_overview[display_cols],
+            df_overview[disp_cols],
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -450,30 +476,27 @@ if st.session_state['user_role'] == 'user':
                 "참석자_텍스트": st.column_config.TextColumn("참석자 명단", width="large")
             }
         )
-    else:
-        st.info("등록된 회의록이 없습니다.")
+    else: st.info("등록된 회의록이 없습니다.")
 
     st.divider()
 
-    # 2. 회의록 검색 (기존 기능)
-    st.info("💡 키워드로 상세 내용을 검색할 수 있습니다.")
     st.header("🔍 회의록 검색")
     c_s1, c_s2 = st.columns([1, 3])
     with c_s1: st_type = st.selectbox("검색 기준", ["전체", "이름", "학과", "주제", "내용"], key="search_type_usr")
     with c_s2: sk = st.text_input("검색어 입력", key="sk_usr")
     
-    if sk:
-        if not df.empty:
-            if st_type == "전체": mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
-            elif st_type == "이름": mask = df['참석자_텍스트'].str.contains(sk)
-            elif st_type == "학과": mask = df['참석자_텍스트'].str.contains(sk)
-            elif st_type == "주제": mask = df['주제'].str.contains(sk)
-            elif st_type == "내용": mask = df['내용'].str.contains(sk)
-            
-            res = df[mask].sort_values(by="날짜", ascending=False)
-            st.write(f"결과: {len(res)}건")
-            st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
-        else: st.warning("데이터 없음")
+    if sk and not df.empty:
+        if st_type == "전체": mask = df['주제'].str.contains(sk) | df['참석자_텍스트'].str.contains(sk) | df['내용'].str.contains(sk)
+        elif st_type == "이름": mask = df['참석자_텍스트'].str.contains(sk)
+        elif st_type == "학과": mask = df['참석자_텍스트'].str.contains(sk)
+        elif st_type == "주제": mask = df['주제'].str.contains(sk)
+        elif st_type == "내용": mask = df['내용'].str.contains(sk)
+        
+        res = df[mask].sort_values(by="날짜", ascending=False)
+        st.write(f"결과: {len(res)}건")
+        st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
+    elif sk: st.warning("데이터 없음")
+
 else:
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"])
 
