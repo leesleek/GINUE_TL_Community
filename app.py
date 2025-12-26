@@ -171,34 +171,25 @@ def update_row_by_date(tab_name, target_date, new_data_list):
 # ---------------------------------------------------------
 # 2. 인증 및 비밀번호
 # ---------------------------------------------------------
-# [수정] DEFAULT_PW 삭제됨. 초기화를 위한 값만 지역변수로 사용.
-
 def init_settings_sheet():
-    """설정 시트가 비어있을 경우 초기값을 생성하는 함수"""
     try:
         ws = get_worksheet_object("설정")
         if ws:
-            # 헤더 확인
-            current_headers = ws.row_values(1)
-            if not current_headers or current_headers != ["Key", "Value"]:
+            headers = ws.row_values(1)
+            if not headers or headers != ["Key", "Value"]:
                 ws.clear() 
                 ws.append_row(["Key", "Value"])
-                # [중요] DB가 완전히 비었을 때만 이 초기값을 씁니다.
                 ws.append_row(["admin_pw", "삼막로155"]) 
                 ws.append_row(["user_pw", "2601"])
     except: pass
 
 def get_passwords():
-    """구글 시트에서 비밀번호를 가져옵니다. DB 연결 실패 시 빈 dict 반환."""
     init_settings_sheet()
     try:
         ws = get_worksheet_object("설정")
-        if not ws: return {} # 연결 실패 시 로그인 불가 처리
-        
         data = ws.get_all_records()
         df = pd.DataFrame(data)
         pw_dict = {}
-        
         if not df.empty:
             for idx, row in df.iterrows():
                 if row.get('Key') == 'admin_pw':
@@ -206,8 +197,7 @@ def get_passwords():
                 elif row.get('Key') == 'user_pw':
                     pw_dict['user'] = str(row.get('Value'))
         return pw_dict
-    except: 
-        return {} # 에러 발생 시 로그인 불가
+    except: return {}
 
 def update_password(role, new_pw):
     ws = get_worksheet_object("설정")
@@ -449,8 +439,7 @@ if not st.session_state['logged_in']:
         pw = st.text_input("비밀번호", type="password", key="inp_pw")
         if st.button("로그인", type="primary", key="btn_log"):
             pws = get_passwords()
-            if not pws:
-                st.error("DB 연결 실패 또는 설정값 없음.")
+            if not pws: st.error("DB 연결 실패")
             elif auth=="관리자" and pw==pws.get('admin'):
                 st.session_state['logged_in']=True; st.session_state['user_role']="admin"; st.rerun()
             elif auth=="일반사용자" and pw==pws.get('user'):
@@ -519,7 +508,6 @@ if st.session_state['user_role'] == 'user':
             st.dataframe(res.drop(columns=['ID', '참석자_JSON'], errors='ignore'), hide_index=True)
         else: st.warning("데이터 없음")
 else:
-    # 탭 대신 라디오 메뉴 사용 (튕김 방지)
     menu = st.radio("메뉴 선택", 
         ["📝 회의록 입력", "🗂️ 회의록 관리", "🔍 회의록 검색", "👥 재직교수", "🖨️ 출력", "⚙️ 설정"], 
         horizontal=True, 
@@ -726,10 +714,30 @@ else:
             if sels:
                 rows = df[df['날짜'].isin(sels)].to_dict('records')
                 rows = sorted(rows, key=lambda x: x['날짜'])
+                
+                # [수정] CSV 다운로드 (즉시 다운로드)
                 csv_data = create_csv_export(rows).to_csv(index=False).encode('utf-8-sig')
-                st.download_button("CSV", csv_data, "회의록.csv", "text/csv", key="b_c_e")
-                if st.button("PDF", key="b_p_g"):
-                    st.download_button("다운로드", create_signature_pdf(rows), "서명부.pdf", "application/pdf", key="b_p_d")
+                
+                # [수정] PDF 다운로드 (즉시 다운로드, create_signature_pdf 함수가 BytesIO 반환하므로 .getvalue() 호출)
+                pdf_data = create_signature_pdf(rows).getvalue()
+
+                col_d1, col_d2 = st.columns(2)
+                with col_d1:
+                    st.download_button(
+                        label="교수학습공동체회의내용정리를 CSV로 저장", 
+                        data=csv_data, 
+                        file_name="교수학습공동체회의내용정리.csv", 
+                        mime="text/csv", 
+                        key="b_c_e"
+                    )
+                with col_d2:
+                    st.download_button(
+                        label="서명부를 PDF로 저장", 
+                        data=pdf_data, 
+                        file_name=f"서명부_{datetime.today().strftime('%Y-%m-%d')}.pdf", 
+                        mime="application/pdf", 
+                        key="b_p_dl"
+                    )
 
     # 6. 설정
     elif menu == "⚙️ 설정":
